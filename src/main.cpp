@@ -5,6 +5,7 @@
 #include <fstream>
 #include <cmath>
 #include <memory>
+#include <bitset>
 #include <variant>
 #include <cassert>
 
@@ -109,131 +110,424 @@ std::optional<sf::Vector2f> intersection_with_y(float y, Segment const& lhs) {
     return sf::Vector2f{ x, y };
 }
 
-template<typename T, typename I = std::size_t>
-struct Recycler {
-    union Value {
-        Value() : next_free_index{} {};
-        I next_free_index;
-        T value;
+template<typename T, std::size_t N>
+struct BlockedLinkedList {
+    struct Block {
+        std::array<T, N> values;
+        std::unique_ptr<Block> next;
     };
 
+    struct Iterator {
+        Block* block;
+        std::size_t i;
+
+        T& operator*() const {
+            return block->values[i];
+        }
+
+        T* operator->() const {
+            return &block->values[i];
+        }
+
+        Iterator& operator++() {
+            if(i == 0) {
+                block = block->next.get();
+                i = N;
+            }
+            --i;
+            return *this;
+        }
+
+        Iterator operator++(int) const {
+            auto it = *this;
+            return ++it;
+        }
+
+        bool operator==(Iterator const& other) const {
+            return other.block == block && other.i == i;
+        }
+
+        bool operator!=(Iterator const& other) const {
+            return !(*this == other);
+        }
+    };
+
+    struct ConstIterator {
+        Block const* block;
+        std::size_t i;
+
+        T const& operator*() const {
+            return block->values[i];
+        }
+
+        T const* operator->() const {
+            return &block->values[i];
+        }
+
+        ConstIterator& operator++() {
+            if(i == 0) {
+                block = block->next.get();
+                i = N;
+            }
+            --i;
+            return *this;
+        }
+
+        ConstIterator operator++(int) const {
+            auto it = *this;
+            return ++it;
+        }
+
+        bool operator==(ConstIterator const& other) const {
+            return other.block == block && other.i == i;
+        }
+
+        bool operator!=(ConstIterator const& other) const {
+            return !(*this == other);
+        }
+    };
+
+    static_assert(N >= 1);
+
+    std::unique_ptr<Block> root = nullptr;
+    std::size_t size = 0;
+
+    bool is_filled() const {
+        return size % N == 0;
+    }
+
+    void push(T const& v) {
+        auto idx = size % N;
+
+        if (idx == 0) {
+            auto block = std::make_unique<Block>();
+            block->next = std::move(root);
+            root = std::move(block);
+        }
+
+        root->values[idx] = v;
+        ++size;
+    }
+
+    Iterator begin() {
+        return Iterator{ root.get(), (size + N - 1) % N };
+    }
+
+    Iterator end() {
+        return Iterator{ nullptr, N - 1 };
+    }
+
+    ConstIterator begin() const {
+        return ConstIterator{ root.get(), (size + N - 1) % N };
+    }
+
+    ConstIterator end() const {
+        return ConstIterator{ nullptr, N - 1 };
+    }
+
+    ConstIterator cbegin() const {
+        return begin();
+    }
+
+    ConstIterator cend() const {
+        return end();
+    }
+};  
+
+template<typename T, typename I = std::size_t>
+struct Recycler {
     static constexpr I no_more_free_indices = std::numeric_limits<std::size_t>::max();
     
     static constexpr I chunk_size_order = 5;
     static constexpr I chunk_size = 1 << chunk_size_order;
     static constexpr I chunk_index_mask = chunk_size - 1;
 
+    struct Block {
+        union Value {
+            Value() : next_free_index_offset{ 0 } {};
+            ~Value() {};
+            I next_free_index_offset;
+            T value;
+        };
+
+        std::unique_ptr<Value[]> values;
+        std::bitset<chunk_size> valid;
+
+        Block() : values(std::make_unique<Value[]>(chunk_size)) {};
+        Block(nullptr_t) {};
+
+        Block(Block const&) = delete;
+        Block& operator=(Block const&) = delete;
+
+        Block(Block&& b) {
+            std::swap(b.values, values);
+            std::swap(b.valid, valid);
+        }
+
+        Block& operator=(Block&& b) {
+            std::swap(b.values, values);
+            std::swap(b.valid, valid);
+        }
+
+        template<typename...Args>
+        void construct(std::size_t i, Args&&...args) {
+            assert(!valid[i]);
+            new (&values[i].value) T(std::forward<Args>(args)...);
+            valid[i] = true;
+        }
+
+        void destroy(std::size_t i) {
+            value_at(i).~T();
+            valid[i] = false;
+        }
+
+        T& value_at(std::size_t i) {
+            assert(valid[i]);
+            return values[i].value;
+        }
+
+        T const& value_at(std::size_t i) const {
+            assert(valid[i]);
+            return values[i].value;
+        }
+
+        I& free_index_offset_at(std::size_t i) {
+            assert(!valid[i]);
+            return values[i].next_free_index_offset;
+        }
+
+        I const& free_index_offset_at(std::size_t i) const {
+            assert(!valid[i]);
+            return values[i].next_free_index_offset;
+        }
+
+        ~Block() {
+            for(std::size_t i = 0; i < chunk_size; ++i) {
+                if (valid[i]) {
+                    destroy(i);
+                }
+            }
+        }
+    };
+
     static_assert(sizeof(I) <= sizeof(T));
 
-    std::vector<std::unique_ptr<Value[]>> values;
+    std::vector<Block> blocks;
     I free_index = 0;
 
-    Value const& value_at(I i) const {
-        return values[i >> chunk_size_order][i & chunk_index_mask];
+    bool empty() const {
+        return blocks.empty();
     }
 
-    Value& value_at(I i) {
-        return values[i >> chunk_size_order][i & chunk_index_mask];
+    static std::pair<I, I> decompose(I idx) {
+        return { idx >> chunk_size_order, idx & chunk_index_mask };
     }
 
-    T const& operator[](I i) const {
-        return value_at(i).value;
+    T const& operator[](I idx) const {
+        auto[block_idx, in_block_idx] = decompose(idx);
+        return blocks[block_idx].value_at(in_block_idx);
     }
 
-    T& operator[](I i) {
-        return value_at(i).value;
+    T& operator[](I idx) {
+        auto[block_idx, in_block_idx] = decompose(idx);
+        return blocks[block_idx].value_at(in_block_idx);
     }
 
     I capacity() const {
-        return values.size() << chunk_size_order;
-    }
-
-    void push_new_block() {
-        I i = capacity();
-        auto& new_block = values.emplace_back(std::make_unique<Value[]>(chunk_size));
-        for(std::size_t j = 0; j < chunk_size; ++j) {
-            std::cout << "  " << ((values.size() - 1) << chunk_size_order | j) << " -> " << i + j + 1 << '\n';
-            new_block[j].next_free_index = i + j + 1;
-        }
+        return blocks.size() << chunk_size_order;
     }
 
     I push(T const& t) {
+        return emplace(t);
+    }
+
+    I push(T&& t) {
+        return emplace(std::move(t));
+    }
+
+    template<typename...Args>
+    I emplace(Args&&...args) {
         auto const idx = free_index;
 
-        std::cout << "\nPush\n";
-        std::cout << "  idx = " << idx << '\n';
-        std::cout << "  capacity = " << capacity() << '\n';
-
         if (idx >= capacity()) {
-            push_new_block();
-            std::cout << "  new capacity = " << capacity() << '\n';
+            blocks.emplace_back();
         }
 
-        auto& value = value_at(idx);
-        free_index = value.next_free_index;
-        value.value = t;
+        auto[block_idx, in_block_idx] = decompose(idx);
 
-        std::cout << "  free_index = " << free_index << '\n';
+        free_index = blocks[block_idx].free_index_offset_at(in_block_idx) + 1 + idx;
+        blocks[block_idx].construct(in_block_idx, std::forward<Args>(args)...);
 
         return idx;
     }
 
-    void pop(I i) {
-        std::cout << "  " << i << " -> " << free_index << '\n';
-        std::cout << "  free_index = " << i << '\n';
-        value_at(i).next_free_index = free_index;
-        free_index = i;
+    void pop(I idx) {
+        auto[block_idx, in_block_idx] = decompose(idx);
+        blocks[block_idx].destroy(in_block_idx);
+        blocks[block_idx].free_index_offset_at(in_block_idx) = free_index - 1 - idx;
+        free_index = idx;
     }
 };
 
-std::optional<float> compute_best_separation(std::vector<std::pair<float, bool>> points) {
+using separation_point_list_t = std::vector<std::pair<float, bool>>;
+
+template<float sf::Vector2f::* M>
+void push_segment_member(separation_point_list_t& points, Segment const& s) {
+    points.push_back({ s.from.*M, s.from.*M < s.to.*M });
+    points.push_back({ s.to.*M, s.from.*M >= s.to.*M });
+}
+
+void push_segment_x(separation_point_list_t& points, Segment const& s) {
+    return push_segment_member<&sf::Vector2f::x>(points, s);
+}
+
+void push_segment_y(separation_point_list_t& points, Segment const& s) {
+    return push_segment_member<&sf::Vector2f::y>(points, s);
+}
+
+float separation_heuristic(int lhs, int rhs, int n) {
+    // lhs: number of elements *enterely* on the left hand side
+    // rhs: number of elements *enterely* on the right hand side
+    // n: total number of elements
+
+    // Transform an value in [0, n] into an inverse 'V' functions in [0, n]:
+    //
+    // n   / \ 
+    //    /   \ 
+    // 0 /     \ 
+    //  0   n   0 
+    // So the more the value is close to n/2, the higher the value is
+    auto const df = [n] (int x) {
+        return n - std::abs(2*x - n);
+    };
+
+    auto df_lhs = df(lhs);
+    auto df_rhs = df(rhs);
+    auto sum = lhs + rhs; // scale the heuristic based on the number of elements correctly split
+
+    // note: the result will be 0 if lhs or rhs is 0
+    // this is legitimate as a separation that doesn't separate any elements isn't useful
+    return df_lhs * df_rhs * sum;
+}
+
+struct BestSeparation {
+    static constexpr int min_heuristic = 0;
+
+    int heuristic = min_heuristic;
+    std::size_t index = 0;
+    float room_size = std::numeric_limits<float>::min();
+    float lhs, rhs;
+};
+
+BestSeparation find_best_separation(std::vector<std::pair<float, bool>> points) {
+    // Segments = 2 points
+    assert(points.size() % 2 == 0);
+
+    // Sort points based on their component
+    // The second member mean if this is the first point of the segment
+    // A segment (a <-> b) should be inserted as (a, true) *then* (b, false)
     std::sort(std::begin(points), std::end(points), [] (auto const& lhs, auto const& rhs) {
         return lhs.first < rhs.first;
     });
 
-    int const n = points.size() >> 1;
-    int entering = 0;
-    int exiting = 0;
+    int const n = points.size() >> 1; // number of segments
 
-    int min = n << 1; // worst possible result
-    std::size_t min_index = 0;
+    int lhs = 0; // numbers of segments on the left hand side
+    int rhs = n; // numbers of segments on the right hand side
+
+    BestSeparation best;
 
     for(std::size_t i = 0; i < points.size() - 1;) {
+        // Accumulate all the points on the same axis together, we don't want to separate them
         float x = points[i].first;
         do {
-            if(points[i].second) {
-                entering += 2;
-            } else {
-                exiting += 2;
-            }
-
-            ++i;
+            if(!points[i++].second) 
+                ++lhs;
+            else
+                --rhs;
         } while(i < points.size() && points[i].first == x);
 
-        int const m = std::abs(n - entering) + std::abs(n - exiting);
-        if (m < min) {
-            min = m;
-            min_index = i-1;
+        int const current_heurisitic = separation_heuristic(lhs, rhs, n);
+        float current_room = points[i].first - points[i - 1].first;
+        // The room size is only taken into account when there's a similar heurisitic
+        if (current_heurisitic > best.heuristic 
+        || (current_heurisitic == best.heuristic && current_room > best.room_size)) {
+            best = {
+                current_heurisitic,
+                i - 1,
+                current_room   
+            };
         }
     }
 
-    if (min == n << 1) {
+    if (best.heuristic == BestSeparation::min_heuristic) {
+        // Heuristic of the last index should return 0, thus not end up in this branch
+        assert(best.index + 1 < points.size());
+
+        best.lhs = points[best.index].first;
+        best.rhs = points[best.index + 1].first;
+    }
+
+    return best;
+}
+
+std::optional<float> compute_best_separation(std::vector<std::pair<float, bool>> points) {
+    auto best = find_best_separation(std::move(points));
+
+    // No separation exists such that at least one segment can be separated from another
+    // In other words, they are all overlapping
+    if (best.heuristic == BestSeparation::min_heuristic) {
         return std::nullopt;
     }
 
-    assert(min_index + 1 < points.size());
+    return (best.lhs + best.rhs) / 2.f;
+}
 
-    return (points[min_index].first + points[min_index + 1].first) / 2.f;
+enum class SeparationAxis {
+    Vertical, Horizontal
+};
+
+std::optional<std::pair<SeparationAxis, float>> compute_best_separation(std::vector<Segment> const& segments) {
+    separation_point_list_t xs;
+    separation_point_list_t ys;
+
+    for(auto const& s : segments) {
+        push_segment_x(xs, s);
+        push_segment_y(ys, s);
+    }
+
+    auto const best_x = find_best_separation(std::move(xs));
+    auto const best_y = find_best_separation(std::move(ys));
+
+    // No separation exists such that at least one segment can be separated from another
+    // In other words, they are all overlapping
+    if (best_x.heuristic == BestSeparation::min_heuristic && best_y.heuristic == BestSeparation::min_heuristic) {
+        return std::nullopt;
+    }
+
+    if (best_x.heuristic < best_y.heuristic) {
+        return std::make_pair(SeparationAxis::Horizontal, (best_y.lhs + best_y.rhs) / 2.f);
+    }
+    
+    return std::make_pair(SeparationAxis::Vertical, (best_x.lhs + best_x.rhs) / 2.f);
 }
 
 struct QuadTreeNode;
 
 struct QuadTreeLeaf {
-    std::array<std::size_t, 4> values;
-    unsigned char used;
+    BlockedLinkedList<std::size_t, 4> values;
+
+    bool is_filled() const {
+        return values.size != 0 && values.is_filled();
+    }
+
+    void push(Recycler<Segment>& segments, Segment const& segment) {
+        values.push(segments.push(segment));
+    }
+
 };
 
-struct QuadTreeInternalNode {
+struct QuadTreeInternalNodeGrid {
     /*
         0: top left
         1: top right
@@ -261,16 +555,10 @@ struct QuadTreeInternalNode {
         return 3;                           // bottom right
     }
 
-    template<typename F>
-    void containing(Segment const& seg, F f) const;
-    QuadTreeLeaf const* containing_point(sf::Vector2f const& p) const;
-
-    void push(Recycler<QuadTreeNode>& nodes, Recycler<Segment> const& segments, unsigned char max_depth_rem, Segment const& seg, std::size_t idx);
-
     std::array<std::optional<Segment>, 4> separate_segment(Segment const& seg) const;
 };
 
-struct QuadTreeInternalNodeVerticalSlice {
+struct QuadTreeInternalNodeHorizontal {
     /*
         0: top
         1: bottom
@@ -279,6 +567,32 @@ struct QuadTreeInternalNodeVerticalSlice {
 
     float y;
 
+    QuadTreeInternalNodeHorizontal(float y_) : quadrants{ nullptr }, y{ y_ } {}
+
+    inline QuadTreeNode* top() { return quadrants[0]; }
+    inline QuadTreeNode* bottom() { return quadrants[1]; }
+
+    inline QuadTreeNode const* top() const { return quadrants[0]; }
+    inline QuadTreeNode const* bottom() const { return quadrants[1]; }
+
+    inline std::size_t quadrant_id(sf::Vector2f const& p) const {
+        return p.y < y ? 0 : 1;
+    }
+
+    std::array<std::optional<Segment>, 2> separate_segment(Segment const& seg) const;
+};
+
+struct QuadTreeInternalNodeVertical {
+    /*
+        0: left
+        1: right
+    */
+    std::array<QuadTreeNode*, 2> quadrants;
+
+    float x;
+
+    QuadTreeInternalNodeVertical(float x_) : quadrants{ nullptr }, x{ x_ } {}
+
     inline QuadTreeNode* left() { return quadrants[0]; }
     inline QuadTreeNode* right() { return quadrants[1]; }
 
@@ -286,20 +600,150 @@ struct QuadTreeInternalNodeVerticalSlice {
     inline QuadTreeNode const* right() const { return quadrants[1]; }
 
     inline std::size_t quadrant_id(sf::Vector2f const& p) const {
-        return p.y < y ? 0 : 1;
+        return p.x < x ? 0 : 1;
     }
+
+    std::array<std::optional<Segment>, 2> separate_segment(Segment const& seg) const;
+};
+
+template<typename Strategy>
+struct QuadTreeInternalNode : Strategy {
+    
+    template<typename...Args>
+    QuadTreeInternalNode(Args&&...args) : Strategy(std::forward<Args>(args)...) {}
 
     template<typename F>
     void containing(Segment const& seg, F f) const;
     QuadTreeLeaf const* containing_point(sf::Vector2f const& p) const;
 
-    void push(Recycler<QuadTreeNode>& nodes, Recycler<Segment> const& segments, unsigned char max_depth_rem, Segment const& seg, std::size_t idx);
-
-    std::array<std::optional<Segment>, 2> separate_segment(Segment const& seg) const;
+    void push(Recycler<QuadTreeNode>& nodes, unsigned char max_depth_rem, Recycler<Segment>& segments, Segment const& segment);
 };
 
+
 struct QuadTreeNode {
-    std::variant<QuadTreeLeaf, QuadTreeInternalNode> node;
+    std::variant<QuadTreeLeaf, QuadTreeInternalNode<QuadTreeInternalNodeVertical>, QuadTreeInternalNode<QuadTreeInternalNodeHorizontal>> node;
+    unsigned char max_depth_rem;
+
+    bool is_leaf() const {
+        return std::holds_alternative<QuadTreeLeaf>(node);
+    }
+
+    bool is_vertical_node() const {
+        return std::holds_alternative<QuadTreeInternalNode<QuadTreeInternalNodeHorizontal>>(node);
+    }
+
+    bool is_horizontal_node() const {
+        return std::holds_alternative<QuadTreeInternalNode<QuadTreeInternalNodeVertical>>(node);
+    }
+
+    QuadTreeLeaf& as_leaf() {
+        assert(is_leaf());
+        return std::get<QuadTreeLeaf>(node);
+    }
+
+    QuadTreeLeaf const& as_leaf() const {
+        assert(is_leaf());
+        return std::get<QuadTreeLeaf>(node);
+    }
+
+    QuadTreeInternalNode<QuadTreeInternalNodeHorizontal>& as_vertical_node() {
+        assert(is_vertical_node());
+        return std::get<QuadTreeInternalNode<QuadTreeInternalNodeHorizontal>>(node);
+    }
+
+    QuadTreeInternalNode<QuadTreeInternalNodeHorizontal> const& as_vertical_node() const {
+        assert(is_vertical_node());
+        return std::get<QuadTreeInternalNode<QuadTreeInternalNodeHorizontal>>(node);
+    }
+
+    QuadTreeInternalNode<QuadTreeInternalNodeVertical>& as_horizontal_node() {
+        assert(is_horizontal_node());
+        return std::get<QuadTreeInternalNode<QuadTreeInternalNodeVertical>>(node);
+    }
+
+    QuadTreeInternalNode<QuadTreeInternalNodeVertical> const& as_horizontal_node() const {
+        assert(is_horizontal_node());
+        return std::get<QuadTreeInternalNode<QuadTreeInternalNodeVertical>>(node);
+    }
+
+    template<typename F>
+    void containing(Segment const& seg, F f) const {
+        if (is_leaf()) {
+            f(as_leaf());
+        } else {
+            if (is_vertical_node()) {
+                as_vertical_node().containing(seg, f);
+            } else {
+                as_horizontal_node().containing(seg, f);
+            }
+        }
+    }
+
+    QuadTreeLeaf const* containing_point(sf::Vector2f const& p) const {
+        if (is_leaf()) {
+            return &as_leaf();
+        } else {
+            if (is_vertical_node()) {
+                return as_vertical_node().containing_point(p);
+            } else {
+                return as_horizontal_node().containing_point(p);
+            }
+        }
+    }
+
+    void push(Recycler<QuadTreeNode>& nodes, Recycler<Segment>& segments, Segment const& segment) {
+        if (is_leaf()) {
+            auto& leaf = as_leaf();
+
+            std::cout << "Slice ? " << leaf.values.size << " && " << int(max_depth_rem) << " => " << (max_depth_rem != 0 && leaf.is_filled()) << '\n';
+            if (max_depth_rem != 0 && leaf.is_filled()) {
+                auto transfert_to = [&] (auto new_node) {
+                    for(auto i : leaf.values) {
+                        auto seg = segments[i];
+                        segments.pop(i);
+                        new_node.push(nodes, max_depth_rem, segments, seg);
+                    }
+                    return new_node;
+                };
+
+                std::vector<Segment> all_segments;
+                all_segments.reserve(leaf.values.size + 1); // segments in the leaf + the segment being pushed
+
+                std::copy(std::begin(leaf.values), std::end(leaf.values), std::back_inserter(all_segments));
+                all_segments.push_back(segment);
+
+
+                auto best_separation = compute_best_separation(all_segments);
+
+                if (best_separation) {
+                    auto[axis, value] = *best_separation;
+                    if (axis == SeparationAxis::Horizontal) {
+                        node = transfert_to(QuadTreeInternalNode<QuadTreeInternalNodeHorizontal>{ value });
+                    } else {
+                        node = transfert_to(QuadTreeInternalNode<QuadTreeInternalNodeVertical>{ value });
+                    }
+                }
+                // else keep the leaf
+            }
+
+            if (is_leaf()) { // no good separation where found...
+                std::cout << "### Finally Push (" << segment.from.x << ", " << segment.from.y << ") => (" << segment.to.x << ", " << segment.to.y << ")\n";
+                as_leaf().push(segments, segment);
+                return;
+            }
+
+        }
+
+        if (is_vertical_node()) {
+            as_vertical_node().push(nodes, max_depth_rem, segments, segment);
+        } else {
+            as_horizontal_node().push(nodes, max_depth_rem, segments, segment);
+        }
+    }
+};
+/*
+struct QuadTreeNode {
+    std::variant<QuadTreeLeaf, QuadTreeInternalNode<QuadTreeInternalNodeGrid>> node;
     unsigned char max_depth_rem;
 
     bool is_leaf() const {
@@ -316,14 +760,14 @@ struct QuadTreeNode {
         return std::get<QuadTreeLeaf>(node);
     }
 
-    QuadTreeInternalNode& as_node() {
+    QuadTreeInternalNode<QuadTreeInternalNodeGrid>& as_node() {
         assert(!is_leaf());
-        return std::get<QuadTreeInternalNode>(node);
+        return std::get<QuadTreeInternalNode<QuadTreeInternalNodeGrid>>(node);
     }
 
-    QuadTreeInternalNode const& as_node() const {
+    QuadTreeInternalNode<QuadTreeInternalNodeGrid> const& as_node() const {
         assert(!is_leaf());
-        return std::get<QuadTreeInternalNode>(node);
+        return std::get<QuadTreeInternalNode<QuadTreeInternalNodeGrid>>(node);
     }
 
     template<typename F>
@@ -356,7 +800,7 @@ struct QuadTreeNode {
                 leaf.values[leaf.used++] = idx;
                 return;
             }
-            QuadTreeInternalNode new_node{ 0, 0, 0, 0 };
+            QuadTreeInternalNode<QuadTreeInternalNodeGrid> new_node{ 0, 0, 0, 0 };
 
             float x = 0;
             float y = 0;
@@ -382,19 +826,21 @@ struct QuadTreeNode {
         as_node().push(nodes, segments, max_depth_rem, seg, idx);
     }
 };
-
+*/
+template<typename S>
 template<typename F>
-void QuadTreeInternalNode::containing(Segment const& seg, F f) const {
-    auto parts = separate_segment(seg);
+void QuadTreeInternalNode<S>::containing(Segment const& seg, F f) const {
+    auto parts = S::separate_segment(seg);
     for(std::size_t q = 0; q < std::size(parts); ++q) {
         if (parts[q]) {
-            quadrants[q]->containing(seg, f);
+            S::quadrants[q]->containing(seg, f);
         }
     }
 }
 
-QuadTreeLeaf const* QuadTreeInternalNode::containing_point(sf::Vector2f const& p) const {
-    auto q = quadrants[quadrant_id(p)];
+template<typename S>
+QuadTreeLeaf const* QuadTreeInternalNode<S>::containing_point(sf::Vector2f const& p) const {
+    auto q = S::quadrants[S::quadrant_id(p)];
     if (q) {
         return q->containing_point(p);
     }
@@ -402,27 +848,20 @@ QuadTreeLeaf const* QuadTreeInternalNode::containing_point(sf::Vector2f const& p
     return nullptr;
 }
 
-void QuadTreeInternalNode::push(Recycler<QuadTreeNode>& nodes, Recycler<Segment> const& segments, unsigned char max_depth_rem, Segment const& seg, std::size_t idx) {
-    auto parts = separate_segment(seg);
+template<typename S>
+void QuadTreeInternalNode<S>::push(Recycler<QuadTreeNode>& nodes, unsigned char max_depth_rem, Recycler<Segment>& segments, Segment const& segment) {
+    auto parts = S::separate_segment(segment);
     for(std::size_t q = 0; q < std::size(parts); ++q) {
         if (parts[q]) {
-            if (!quadrants[q]) {
-                quadrants[q] = &nodes[nodes.push({ QuadTreeLeaf{ {}, 0 }, static_cast<unsigned char>(max_depth_rem - 1) })];
+            if (!S::quadrants[q]) {
+                S::quadrants[q] = &nodes[nodes.push({ QuadTreeLeaf{}, static_cast<unsigned char>(max_depth_rem - 1) })];
             }
-            quadrants[q]->push(nodes, segments, *parts[q], idx);
+            S::quadrants[q]->push(nodes, segments, *parts[q]);
         }
     }
 }
-/*
-std::array<size_t const*, 4> QuadTreeInternalNode::get_nodes(Segment const& seg) const {
-    auto this_mut = const_cast<QuadTreeInternalNode*>(this);
-    auto nodes = this_mut->get_nodes(seg);
-    std::array<size_t const*, 4> const_nodes;
-    std::copy(std::begin(nodes), std::end(nodes), std::begin(const_nodes));
-    return const_nodes;
-}
-*/
-std::array<std::optional<Segment>, 4> QuadTreeInternalNode::separate_segment(Segment const& seg) const {
+
+std::array<std::optional<Segment>, 4> QuadTreeInternalNodeGrid::separate_segment(Segment const& seg) const {
     std::array<std::optional<Segment>, 4> parts{ std::nullopt };
 
     auto from = seg.from;
@@ -514,144 +953,73 @@ std::array<std::optional<Segment>, 4> QuadTreeInternalNode::separate_segment(Seg
 
     return parts;
 }
-/*
-std::array<size_t*, 4> QuadTreeInternalNode::get_nodes(Segment const& seg) {
-    auto cv = intersection_with_x(x, seg);
-    auto ch = intersection_with_y(y, seg);
 
-    bool on_top_left = false;
-    bool on_top_right = false;
-    bool on_bottom_left = false;
-    bool on_bottom_right = false;
+std::array<std::optional<Segment>, 2> QuadTreeInternalNodeHorizontal::separate_segment(Segment const& seg) const {
+    std::array<std::optional<Segment>, 2> parts{ std::nullopt };
 
-    if (cv && ch) {
-        if (seg.from.x < x) {
-            if (seg.from.y < y) {
-                // top left to bottom right
-                if (ch->x < x) { // pass by bottom left
-                    on_top_left = true;
-                    on_bottom_left = true;
-                    on_bottom_right = true;
-                } else if (ch->x > x) { // pass by top right
-                    on_top_left = true;
-                    on_top_right = true;
-                    on_bottom_right = true;
-                } else { // intersect at the center
-                    on_top_left = true;
-                    on_bottom_right = true;
-                }
-            } else {
-                // bottom left to top right
-                if (ch->x < x) { // pass by top left
-                    on_bottom_left = true;
-                    on_top_left = true;
-                    on_top_right = true;
-                } else if (ch->x > x) { // pass by bottom right
-                    on_bottom_left = true;
-                    on_bottom_right = true;
-                    on_top_right = true;
-                } else { // intersect at the center
-                    on_bottom_left= true;
-                    on_top_right = true;
-                }
-            }
-        } else {
-            if (seg.from.y < y) {
-                // top right to bottom left
-                if (ch->x < x) { // pass by top left
-                    on_top_right = true;
-                    on_top_left = true;
-                    on_bottom_left = true;
-                } else if (ch->x > x) { // pass by bottom right 
-                    on_top_right = true;
-                    on_bottom_right = true;
-                    on_bottom_left = true;
-                } else { // intersect at the center
-                    on_top_right = true;
-                    on_bottom_left = true;
-                }
-            } else {
-                // bottom right to top left
-                if (ch->x < x) { // pass by bottom left
-                    on_bottom_right = true;
-                    on_bottom_left = true;
-                    on_top_left = true;
-                } else if (ch->x > x) { // pass by top right
-                    on_bottom_right = true;
-                    on_top_right = true;
-                    on_top_left = true;
-                } else { // intersect at the center
-                    on_bottom_right = true;
-                    on_top_left = true;
-                }
-            }
-        }
-    } else if (cv) {
-        if (seg.from.y < y) {
-            on_top_left = true;
-            on_top_right = true;
-        } else {
-            on_bottom_left = true;
-            on_bottom_right = true;
-        }
-    } else if (ch) {
-        if (seg.from.x < x) {
-            on_top_left = true;
-            on_bottom_left = true;
-        } else {
-            on_top_right = true;
-            on_bottom_right = true;
-        }
-    } else {
-        if (seg.from.x < x) {
-            if (seg.from.y < y) {
-                on_top_left = true;
-            } else {
-                on_bottom_left = true;
-            }
-        } else {
-            if (seg.from.y < y) {
-                on_top_right = true;
-            } else {
-                on_bottom_right = true;
-            }
-        }
+    auto const q_from = quadrant_id(seg.from);
+    auto const q_to = quadrant_id(seg.to);
+
+    // Same quadrant
+    if (q_from == q_to) {
+        parts[q_from] = seg;
+        return parts;
     }
 
-    std::array<size_t*, 4> nodes{ nullptr };
-    std::size_t i = 0;
-    if (on_top_left) nodes[i++] = &top_left;
-    if (on_top_right) nodes[i++] = &top_right;
-    if (on_bottom_left) nodes[i++] = &bottom_left;
-    if (on_bottom_right) nodes[i++] = &bottom_right;
+    auto intersection = intersection_with_y(y, seg);
+    assert(intersection);
+    parts[q_from] = Segment{ seg.from, *intersection };
+    parts[q_to] = Segment{ seg.to, *intersection };
 
-    return nodes;
+    return parts;
 }
-*/
+
+std::array<std::optional<Segment>, 2> QuadTreeInternalNodeVertical::separate_segment(Segment const& seg) const {
+    std::array<std::optional<Segment>, 2> parts{ std::nullopt };
+
+    auto const q_from = quadrant_id(seg.from);
+    auto const q_to = quadrant_id(seg.to);
+
+    // Same quadrant
+    if (q_from == q_to) {
+        parts[q_from] = seg;
+        return parts;
+    }
+
+    auto intersection = intersection_with_x(x, seg);
+    assert(intersection);
+    parts[q_from] = Segment{ seg.from, *intersection };
+    parts[q_to] = Segment{ seg.to, *intersection };
+
+    return parts;
+}
+
 struct Quadtree {
     Recycler<Segment> segments;
     Recycler<QuadTreeNode> nodes;
 
     QuadTreeNode& get_root() {
-        assert(!nodes.values.empty());
+        assert(!nodes.empty());
         return nodes[0];
     }
 
     QuadTreeNode const& get_root() const {
-        assert(!nodes.values.empty());
+        assert(!nodes.empty());
         return nodes[0];
     }
 
     void push(Segment const& s) {
-        auto idx = segments.push(s);
-        get_root().push(nodes, segments, s, idx);
+        std::cout << std::string(40, '=') << '\n';
+        std::cout << "\tPush (" << s.from.x << ", " << s.from.y << ") => (" << s.to.x << ", " << s.to.y << ")\n";
+        std::cout << std::string(40, '=') << '\n';
+        get_root().push(nodes, segments, s);
     }
 
     template<typename F>
     void intersections(Segment const& s, F&& f) const {
         get_root().containing(s, [&] (QuadTreeLeaf const& leaf) {
-            for(std::size_t i = 0; i < leaf.used; ++i) {
-                if (auto p = intersection(s, segments[leaf.values[i]])) {
+            for(auto value : leaf.values) {
+                if (auto p = intersection(s, segments[value])) {
                     f(*p);
                 }
             }
@@ -662,8 +1030,8 @@ struct Quadtree {
     void close_to(sf::Vector2f p, F&& f) const {
         auto leaf = get_root().containing_point(p);
         if (leaf) {
-            for(std::size_t i = 0; i < leaf->used; ++i) {
-                f(segments[leaf->values[i]]);
+            for(auto s : leaf->values) {
+                f(segments[s]);
             }
         }
     }
@@ -936,42 +1304,43 @@ void walk(sf::RenderTarget& target, sf::FloatRect bounds, Quadtree const& quadtr
     };
     if (node.is_leaf()) return;
 
-    auto const& internal_node = node.as_node();
+    if (node.is_horizontal_node()) {
+        auto const& internal_node = node.as_horizontal_node();
+        std::array separators{
+            sf::Vertex({ internal_node.x, bounds.top }, colors[depth % colors.size()]),
+            sf::Vertex({ internal_node.x, bounds.top + bounds.height }, colors[depth % colors.size()])
+        };
 
-    std::array separators{
-        sf::Vertex({ internal_node.x, bounds.top }, colors[depth % colors.size()]),
-        sf::Vertex({ internal_node.x, bounds.top + bounds.height }, colors[depth % colors.size()]),
-        sf::Vertex({ bounds.left, internal_node.y }, colors[depth % colors.size()]),
-        sf::Vertex({ bounds.left + bounds.width, internal_node.y }, colors[depth % colors.size()])
-    };
+        target.draw(separators.data(), separators.size(), sf::PrimitiveType::Lines);
 
-    target.draw(separators.data(), separators.size(), sf::PrimitiveType::Lines);
+        sf::FloatRect left_bounds(
+            bounds.left, bounds.top, 
+            internal_node.x - bounds.left, bounds.height);
+        sf::FloatRect right_bounds(
+            internal_node.x, bounds.top, 
+            bounds.left + bounds.width - internal_node.x, bounds.height);
 
-    float bx = bounds.left;
-    float sx = internal_node.x;
-    float ex = bounds.left + bounds.width;
+        if(internal_node.left()) walk(target, left_bounds, quadtree, *internal_node.left(), depth + 1);
+        if(internal_node.left()) walk(target, right_bounds, quadtree, *internal_node.right(), depth + 1);
+    } else {
+        auto const& internal_node = node.as_vertical_node();
+        std::array separators{
+            sf::Vertex({ bounds.left, internal_node.y }, colors[depth % colors.size()]),
+            sf::Vertex({ bounds.left + bounds.width, internal_node.y }, colors[depth % colors.size()])
+        };
 
-    float by = bounds.top;
-    float sy = internal_node.y;
-    float ey = bounds.top + bounds.height;
+        target.draw(separators.data(), separators.size(), sf::PrimitiveType::Lines);
 
-    sf::FloatRect top_left_bounds(
-        bx, by, 
-        sx - bx, sy - by);
-    sf::FloatRect top_right_bounds(
-        sx, by, 
-        ex - sx, sy - by);
-    sf::FloatRect bottom_left_bounds(
-        bx, sy, 
-        sx - bx, ey - sy);
-    sf::FloatRect bottom_right_bounds(
-        sx, sy, 
-        ex - sx, ey - sy);
+        sf::FloatRect left_bounds(
+            bounds.left, bounds.top, 
+            bounds.width, internal_node.y - bounds.top);
+        sf::FloatRect right_bounds(
+            bounds.left, internal_node.y, 
+            bounds.width, bounds.top + bounds.height - internal_node.y);
 
-    if(internal_node.top_left()) walk(target, top_left_bounds, quadtree, *internal_node.top_left(), depth + 1);
-    if(internal_node.top_right()) walk(target, top_right_bounds, quadtree,*internal_node.top_right(), depth + 1);
-    if(internal_node.bottom_left()) walk(target, bottom_left_bounds, quadtree,*internal_node.bottom_left(), depth + 1);
-    if(internal_node.bottom_right()) walk(target, bottom_right_bounds, quadtree, *internal_node.bottom_right(), depth + 1);
+        if(internal_node.top()) walk(target, left_bounds, quadtree, *internal_node.top(), depth + 1);
+        if(internal_node.bottom()) walk(target, right_bounds, quadtree, *internal_node.bottom(), depth + 1);
+    }
 }
 
 Leaf& find_leaf_with_point(Node& node, sf::Vector2f const& p) {
@@ -1014,7 +1383,7 @@ int main(int argc, char** argv) {
     Node collision_quadtree;
 
     Quadtree new_quadtree;
-    new_quadtree.nodes.push({ QuadTreeLeaf{ {}, 0 }, 10 });
+    new_quadtree.nodes.push({ QuadTreeLeaf{}, 10 });
 
     if (argc >= 2) {
         bool already_loaded = false;
@@ -1094,7 +1463,7 @@ int main(int argc, char** argv) {
 
     Node test_quadtree;
     Quadtree new_test_quadtree;
-    new_test_quadtree.nodes.push({ QuadTreeLeaf{ {}, 0 }, 10 });
+    new_test_quadtree.nodes.push({ QuadTreeLeaf{}, 10 });
 
     while(window.isOpen()) {
         sf::Event event;
