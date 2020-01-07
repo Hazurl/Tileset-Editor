@@ -121,6 +121,12 @@ struct BlockedLinkedList {
         Block* block;
         std::size_t i;
 
+        using value_type = T; 
+        using pointer = T*; 
+        using reference = T&; 
+        using difference_type = void;
+        using iterator_category = std::forward_iterator_tag;
+
         T& operator*() const {
             return block->values[i];
         }
@@ -155,6 +161,12 @@ struct BlockedLinkedList {
     struct ConstIterator {
         Block const* block;
         std::size_t i;
+
+        using value_type = T; 
+        using pointer = T const*; 
+        using reference = T const&; 
+        using difference_type = void;
+        using iterator_category = std::forward_iterator_tag;
 
         T const& operator*() const {
             return block->values[i];
@@ -392,9 +404,9 @@ float separation_heuristic(int lhs, int rhs, int n) {
 
     // Transform an value in [0, n] into an inverse 'V' functions in [0, n]:
     //
-    // n   / \ 
-    //    /   \ 
-    // 0 /     \ 
+    // n   / \              .
+    //    /   \             .
+    // 0 /     \            .
     //  0   n   0 
     // So the more the value is close to n/2, the higher the value is
     auto const df = [n] (int x) {
@@ -460,7 +472,7 @@ BestSeparation find_best_separation(std::vector<std::pair<float, bool>> points) 
         }
     }
 
-    if (best.heuristic == BestSeparation::min_heuristic) {
+    if (best.heuristic > BestSeparation::min_heuristic) {
         // Heuristic of the last index should return 0, thus not end up in this branch
         assert(best.index + 1 < points.size());
 
@@ -502,13 +514,16 @@ std::optional<std::pair<SeparationAxis, float>> compute_best_separation(std::vec
     // No separation exists such that at least one segment can be separated from another
     // In other words, they are all overlapping
     if (best_x.heuristic == BestSeparation::min_heuristic && best_y.heuristic == BestSeparation::min_heuristic) {
+        std::cout << "No separation available\n";
         return std::nullopt;
     }
 
     if (best_x.heuristic < best_y.heuristic) {
+        std::cout << "Best Separation on Y " << (best_y.lhs + best_y.rhs) / 2.f << '\n';
         return std::make_pair(SeparationAxis::Horizontal, (best_y.lhs + best_y.rhs) / 2.f);
     }
-    
+
+    std::cout << "Best Separation on X " << (best_x.lhs + best_x.rhs) / 2.f << '\n';
     return std::make_pair(SeparationAxis::Vertical, (best_x.lhs + best_x.rhs) / 2.f);
 }
 
@@ -709,7 +724,9 @@ struct QuadTreeNode {
                 std::vector<Segment> all_segments;
                 all_segments.reserve(leaf.values.size + 1); // segments in the leaf + the segment being pushed
 
-                std::copy(std::begin(leaf.values), std::end(leaf.values), std::back_inserter(all_segments));
+                for(auto s : leaf.values) {
+                    all_segments.push_back(segments[s]);
+                }
                 all_segments.push_back(segment);
 
 
