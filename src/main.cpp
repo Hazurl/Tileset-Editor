@@ -10,7 +10,7 @@
 #include <cassert>
 
 enum class Mode {
-    Tiles, Collision, Test, SIZE
+    Tiles, Collision, TestQuadtree, TestRay, SIZE
 };
 
 struct Segment {
@@ -23,12 +23,12 @@ struct Point {
     std::vector<std::size_t> lines;
 };
 
-float sqrt_magnitude(sf::Vector2f const& v) {
-    return v.x * v.x + v.y + v.y;
+float sq_magnitude(sf::Vector2f const& v) {
+    return v.x * v.x + v.y * v.y;
 }
 
 float magnitude(sf::Vector2f const& v) {
-    return std::sqrt(sqrt_magnitude(v));
+    return std::sqrt(sq_magnitude(v));
 }
 
 sf::Vector2f normalize(sf::Vector2f const& v) {
@@ -1037,7 +1037,7 @@ struct Quadtree {
         get_root().containing(s, [&] (QuadTreeLeaf const& leaf) {
             for(auto value : leaf.values) {
                 if (auto p = intersection(s, segments[value])) {
-                    f(*p);
+                    f(segments[value], *p);
                 }
             }
         });
@@ -1397,7 +1397,6 @@ int main(int argc, char** argv) {
     
     std::vector<std::vector<sf::Vertex>> collision_group_vertices = {{}};
     std::size_t current_group = 0;
-    Node collision_quadtree;
 
     Quadtree new_quadtree;
     new_quadtree.nodes.push({ QuadTreeLeaf{}, 10 });
@@ -1427,7 +1426,6 @@ int main(int argc, char** argv) {
                     if (collision_group_vertices[current_group].size() >= 1) {
                         auto p0 = collision_group_vertices[current_group].back().position;
                         auto p1 = sf::Vector2f{ fx, fy };
-                        collision_quadtree.push_line(Segment{ p0, p1 });
                         new_quadtree.push(Segment{ p0, p1 });
                     }
 
@@ -1478,12 +1476,20 @@ int main(int argc, char** argv) {
 
     std::vector<sf::Vertex> all_lines;
 
-    Node test_quadtree;
-    Quadtree new_test_quadtree;
-    new_test_quadtree.nodes.push({ QuadTreeLeaf{}, 10 });
+    Quadtree test_quadtree;
+    test_quadtree.nodes.push({ QuadTreeLeaf{}, 10 });
+
+    bool test_ray_rotating = false;
+    Segment test_ray{
+        { mouse_position.x, mouse_position.y },
+        { mouse_position.x + 1000.f, mouse_position.y}
+    };
+
+    sf::Clock clock;
 
     while(window.isOpen()) {
         sf::Event event;
+        float const dt = clock.restart().asSeconds();
         while(window.pollEvent(event)) {
             if (event.type == sf::Event::KeyPressed) {
                 if (event.key.code == sf::Keyboard::M) {
@@ -1553,7 +1559,6 @@ int main(int argc, char** argv) {
                             };
                             if (collision_group_vertices[current_group].size() >= 1) {
                                 auto p0 = collision_group_vertices[current_group].back().position;
-                                collision_quadtree.push_line(Segment{ p0, mouse_on_grid });
                                 new_quadtree.push(Segment{ p0, mouse_on_grid });
                             }
                             collision_group_vertices[current_group].push_back(sf::Vertex(mouse_on_grid, sf::Color::Red));
@@ -1578,9 +1583,9 @@ int main(int argc, char** argv) {
                 }
 
 /////////////////////////////////////////////////////////////////////////////////////
-// MODE TEST
+// MODE TEST QUADTREE
 /////////////////////////////////////////////////////////////////////////////////////
-                case Mode::Test: {
+                case Mode::TestQuadtree: {
                     if (event.type == sf::Event::Closed) {
                         window.close();
                     } else if (event.type == sf::Event::MouseButtonPressed) {
@@ -1593,8 +1598,7 @@ int main(int argc, char** argv) {
                             current_line[1].position = { event.mouseButton.x, event.mouseButton.y };
                             all_lines.emplace_back(current_line[0]).color = sf::Color::Blue;
                             all_lines.emplace_back(current_line[1]).color = sf::Color::Blue;
-                            test_quadtree.push_line({ current_line[0].position, current_line[1].position });
-                            new_test_quadtree.push({ current_line[0].position, current_line[1].position });
+                            test_quadtree.push({ current_line[0].position, current_line[1].position });
                         }
                     } else if (event.type == sf::Event::MouseWheelScrolled) {
                     } else if (event.type == sf::Event::MouseMoved) {
@@ -1602,27 +1606,59 @@ int main(int argc, char** argv) {
                     }
                     break;
                 }
-            }
-        }
 
-        window.clear(sf::Color{50, 50, 50});
-        if (mode != Mode::Test) {
-            for(auto&&[_, spr] : sprites) {
-                window.draw(spr);
-            }
-            for(auto const& grp : collision_group_vertices) {
-                if (grp.size() > 1) {
-                    window.draw(grp.data(), grp.size(), sf::PrimitiveType::LineStrip);
+/////////////////////////////////////////////////////////////////////////////////////
+// MODE TEST RAY
+/////////////////////////////////////////////////////////////////////////////////////
+                case Mode::TestRay: {
+                    if (event.type == sf::Event::Closed) {
+                        window.close();
+                    } else if (event.type == sf::Event::MouseMoved) {
+                        sf::Vector2f mouse{ event.mouseMove.x, event.mouseMove.y };
+                        if (sf::Mouse::isButtonPressed(sf::Mouse::Left)) {
+                            auto dir = mouse - test_ray.from;
+                            if (dir != sf::Vector2f{}) {
+                                test_ray.to = test_ray.from + normalize(dir) * 1000.f;
+                            }
+                        } else {
+                            auto offset = test_ray.to - test_ray.from;
+                            test_ray.from = mouse;
+                            test_ray.to = mouse + offset;
+                        }
+                    } else if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::P) {
+                        test_ray_rotating = !test_ray_rotating;
+                    }
+                    break;
                 }
             }
         }
 
+        window.clear(sf::Color{50, 50, 50});
+
         switch(mode) {
             case Mode::Tiles: {
+                for(auto&&[_, spr] : sprites) {
+                    window.draw(spr);
+                }
                 window.draw(tile_selected);
                 break;
             }
             case Mode::Collision: {
+                for(auto&&[_, spr] : sprites) {
+                    auto old_color = spr.getColor();
+                    auto new_color = old_color; new_color.a /= 4.f;
+
+                    spr.setColor(new_color);
+                    window.draw(spr);
+                    spr.setColor(old_color);
+                }
+
+                for(auto const& grp : collision_group_vertices) {
+                    if (grp.size() > 1) {
+                        window.draw(grp.data(), grp.size(), sf::PrimitiveType::LineStrip);
+                    }
+                }
+
                 sf::Vector2f mouse_on_grid{ 
                     std::round(mouse_position.x / grid_size) * grid_size, 
                     std::round(mouse_position.y / grid_size) * grid_size
@@ -1636,62 +1672,67 @@ int main(int argc, char** argv) {
                 window.draw(point);
 
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::I)) {
-                    walk(window, sf::FloatRect(0, 0, window.getSize().x, window.getSize().y), collision_quadtree);
-                    auto& leaf = find_leaf_with_point(collision_quadtree, window.mapPixelToCoords(sf::Mouse::getPosition(window)));
-                    std::vector<sf::Vertex> vertices(leaf.lines.size() * 2, sf::Vertex({}, sf::Color::Green));
-                    auto it = std::begin(vertices);
-                    for(auto const& l : leaf.lines) {
-                        (it++)->position = l.from;
-                        (it++)->position = l.to;
-                    }
-                    window.draw(vertices.data(), vertices.size(), sf::PrimitiveType::Lines);
-                } else if (sf::Keyboard::isKeyPressed(sf::Keyboard::O)) {
                     walk(window, sf::FloatRect(0, 0, window.getSize().x, window.getSize().y), new_quadtree, new_quadtree.get_root());
-                    //auto& leaf = find_leaf_with_point(collision_quadtree, window.mapPixelToCoords(sf::Mouse::getPosition(window)));
-                    //std::vector<sf::Vertex> vertices(leaf.lines.size() * 2, sf::Vertex({}, sf::Color::Green));
-                    //auto it = std::begin(vertices);
-                    //for(auto const& l : leaf.lines) {
-                    //    (it++)->position = l.from;
-                    //    (it++)->position = l.to;
-                    //}
-                    //window.draw(vertices.data(), vertices.size(), sf::PrimitiveType::Lines);
+                    std::vector<sf::Vertex> vertices;
+                    new_quadtree.close_to(window.mapPixelToCoords(sf::Mouse::getPosition(window)), [&vertices] (auto const& segment) {
+                        vertices.emplace_back(segment.from, sf::Color::Green);
+                        vertices.emplace_back(segment.to, sf::Color::Green);
+                    });
+
+                    window.draw(vertices.data(), vertices.size(), sf::PrimitiveType::Lines);
                 }
 
                 break;
             }
-            case Mode::Test: {
-                /*
+
+            case Mode::TestQuadtree: {
                 if (sf::Mouse::isButtonPressed(sf::Mouse::Left)) {
                     window.draw(current_line.data(), current_line.size(), sf::PrimitiveType::Lines);
                 }
                 window.draw(all_lines.data(), all_lines.size(), sf::PrimitiveType::Lines);
-                walk(window, sf::FloatRect(0, 0, window.getSize().x, window.getSize().y), test_quadtree);
-
-                if (sf::Keyboard::isKeyPressed(sf::Keyboard::I)) {
-                    auto& leaf = find_leaf_with_point(test_quadtree, window.mapPixelToCoords(sf::Mouse::getPosition(window)));
-                    std::vector<sf::Vertex> vertices(leaf.lines.size() * 2, sf::Vertex({}, sf::Color::Green));
-                    auto it = std::begin(vertices);
-                    for(auto const& l : leaf.lines) {
-                        (it++)->position = l.from;
-                        (it++)->position = l.to;
-                    }
-                    window.draw(vertices.data(), vertices.size(), sf::PrimitiveType::Lines);
-                }*/
-
-                if (sf::Mouse::isButtonPressed(sf::Mouse::Left)) {
-                    window.draw(current_line.data(), current_line.size(), sf::PrimitiveType::Lines);
-                }
-                window.draw(all_lines.data(), all_lines.size(), sf::PrimitiveType::Lines);
-                walk(window, sf::FloatRect(0, 0, window.getSize().x, window.getSize().y), new_test_quadtree, new_test_quadtree.get_root());
+                
+                walk(window, sf::FloatRect(0, 0, window.getSize().x, window.getSize().y), test_quadtree, test_quadtree.get_root());
 
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::I)) {
                     std::vector<sf::Vertex> vertices;
-                    new_test_quadtree.close_to(window.mapPixelToCoords(sf::Mouse::getPosition(window)), [&] (Segment const& s) {
+                    test_quadtree.close_to(window.mapPixelToCoords(sf::Mouse::getPosition(window)), [&] (Segment const& s) {
                         vertices.emplace_back(s.from, sf::Color::Green);
                         vertices.emplace_back(s.to, sf::Color::Green);
                     });
                     window.draw(vertices.data(), vertices.size(), sf::PrimitiveType::Lines);
                 }
+                break;
+            }
+
+            case Mode::TestRay: {
+                if (test_ray_rotating) {
+                    auto dir = normalize(test_ray.to - test_ray.from);
+                    auto angle = std::atan2(dir.y, dir.x);
+                    angle += dt * M_PI_4;
+                    if (angle > M_PI * 2.f) {
+                        angle -= M_PI * 2.f;
+                    }
+
+                    auto new_dir = sf::Vector2f(std::cos(angle), std::sin(angle));
+                    test_ray.to = test_ray.from + new_dir * 1000.f;
+                }
+
+                window.draw(all_lines.data(), all_lines.size(), sf::PrimitiveType::Lines);
+
+                std::array ray_vertices{
+                    sf::Vertex(test_ray.from, sf::Color::White),
+                    sf::Vertex(test_ray.to, sf::Color::White)
+                };
+
+                window.draw(ray_vertices.data(), ray_vertices.size(), sf::PrimitiveType::Lines);
+
+                std::vector<sf::Vertex> vertices;
+                test_quadtree.intersections(test_ray, [&vertices] (auto const& segment, auto const& /*point*/) {
+                        vertices.emplace_back(segment.from, sf::Color::Green);
+                        vertices.emplace_back(segment.to, sf::Color::Green);
+                });
+                window.draw(vertices.data(), vertices.size(), sf::PrimitiveType::Lines);
+
                 break;
             }
         }
