@@ -1,0 +1,3 @@
+[submodule "lib/SFML-Toolkit"]
+	path = lib/SFML-Toolkit
+	url = https://github.com/Hazurl/SFML-Toolkit.git
