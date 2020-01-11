@@ -9,6 +9,11 @@
 #include <variant>
 #include <cassert>
 
+#include <sftk/print/Printer.hpp>
+
+#define SFTK_GIZMO_GLOBAL_PROPERTIES
+#include <sftk/gizmo/Gizmo.hpp>
+
 enum class Mode {
     Tiles, Collision, TestQuadtree, TestRay, SIZE
 };
@@ -1726,12 +1731,10 @@ int main(int argc, char** argv) {
 
                 window.draw(ray_vertices.data(), ray_vertices.size(), sf::PrimitiveType::Lines);
 
-                std::vector<sf::Vertex> vertices;
-                test_quadtree.intersections(test_ray, [&vertices] (auto const& segment, auto const& /*point*/) {
-                        vertices.emplace_back(segment.from, sf::Color::Green);
-                        vertices.emplace_back(segment.to, sf::Color::Green);
+                test_quadtree.intersections(test_ray, [&] (auto const& segment, auto const& point) {
+                    //sftk::draw_line(window.mapCoordsToPixel(segment.from), window.mapCoordsToPixel(segment.to));
+                    //sftk::draw_point(window.mapCoordsToPixel(point));
                 });
-                window.draw(vertices.data(), vertices.size(), sf::PrimitiveType::Lines);
 
                 break;
             }

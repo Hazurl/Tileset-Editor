@@ -91,7 +91,7 @@ STATIC_LINK_FLAG := rcs
 
 # Include path
 # Must be use with -I
-INC_FLAG := -I $(INC_FOLDER) 
+INC_FLAG := -I $(INC_FOLDER) -I ./lib/SFML-Toolkit/include 
 
 #####
 ##### LIBRARY
@@ -99,24 +99,15 @@ INC_FLAG := -I $(INC_FOLDER)
 
 # Path to libaries if not in $PATH, for example (relative to the project folder): lib/
 # Must be use with -L
-LIBS_PATH := 
+LIBS_PATH := -L ./lib/SFML-Toolkit/build/static
 
 # For example: -lsfml-graphics
 LIBS := -ldl -lsfml-graphics -lsfml-window -lsfml-system -lsfml-network 
 
 # Library that require to be build
-LIB_TO_BUILD :=
+LIB_TO_BUILD := ./lib/SFML-Toolkit/build/static/libsftkprinter.a
 
 # Create rules to build the libraries
-
-../engine/build/static/libmulti-pong-engine.a:
-	@$(call _special,BUILDING STATIC LIBRARY ($@)...)
-	@cd ../engine/ && make MAKEFLAGS="" | sed "s/^/\t/"
-
-./lib/SFML-Toolkit/build/static/libsftkfancyText.a:
-	@$(call _special,BUILDING STATIC LIBRARY ($@)...)
-	@cd ./lib/SFML-Toolkit/ && make fancytext-static MAKEFLAGS="" | sed "s/^/\t/"
-
 ./lib/SFML-Toolkit/build/static/libsftkprinter.a:
 	@$(call _special,BUILDING STATIC LIBRARY ($@)...)
 	@cd ./lib/SFML-Toolkit/ && make printer-static MAKEFLAGS="" | sed "s/^/\t/"
